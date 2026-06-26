@@ -54,7 +54,7 @@ const tools: McpToolExport['tools'] = [
   },
   {
     name: 'search_pairs',
-    description: 'Free-text search across all chains. Returns up to 30 pairs.',
+    description: 'Free-text search across all DEX Screener chains for trading pairs matching a token name, symbol, or address. Returns up to 30 pairs with price USD, liquidity, 24h volume, and chain/DEX info.',
     inputSchema: {
       type: 'object',
       properties: { query: { type: 'string' } },

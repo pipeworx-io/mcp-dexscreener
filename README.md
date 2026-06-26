@@ -2,7 +2,7 @@
 
 DEX Screener MCP — DEX price/liquidity/volume data
 
-Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 673+ live data sources.
+Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 965+ live data sources.
 
 ## Tools
 
@@ -10,7 +10,7 @@ Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents 
 |------|-------------|
 | `get_pair` | Pair detail (price USD/native, liquidity, 24h volume, 5m/1h/6h/24h tx counts). |
 | `get_token` | All trading pairs for a token address on one chain. |
-| `search_pairs` | Free-text search across all chains. Returns up to 30 pairs. |
+| `search_pairs` | Free-text search across all DEX Screener chains for trading pairs matching a token name, symbol, or address. Returns up to 30 pairs with price USD, liquidity, 24h volume, and chain/DEX info. |
 | `latest_token_profiles` | Newest token profiles created (cross-chain). |
 | `latest_boosted_tokens` | Tokens being actively promoted on DEX Screener. |
 | `token_boosts_top` | Most-boosted tokens, optionally filtered to a chain / token. |
@@ -29,7 +29,7 @@ Add to your MCP client (Claude Desktop, Cursor, Windsurf, etc.):
 }
 ```
 
-Or connect to the full Pipeworx gateway for access to all 673+ data sources:
+Or connect to the full Pipeworx gateway for access to all 965+ data sources:
 
 ```json
 {

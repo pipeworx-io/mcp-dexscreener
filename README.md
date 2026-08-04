@@ -1,19 +1,23 @@
-# mcp-dexscreener
+# @pipeworx/dexscreener
 
-DEX Screener MCP — DEX price/liquidity/volume data
+DEX Screener MCP — real-time DEX prices and liquidity across all major EVM + Solana chains. No auth.
 
-Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 965+ live data sources.
+Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1394+ live data sources.
 
 ## Tools
 
-| Tool | Description |
-|------|-------------|
-| `get_pair` | Pair detail (price USD/native, liquidity, 24h volume, 5m/1h/6h/24h tx counts). |
-| `get_token` | All trading pairs for a token address on one chain. |
-| `search_pairs` | Free-text search across all DEX Screener chains for trading pairs matching a token name, symbol, or address. Returns up to 30 pairs with price USD, liquidity, 24h volume, and chain/DEX info. |
-| `latest_token_profiles` | Newest token profiles created (cross-chain). |
-| `latest_boosted_tokens` | Tokens being actively promoted on DEX Screener. |
-| `token_boosts_top` | Most-boosted tokens, optionally filtered to a chain / token. |
+- `get_pair(chain, pair_address)` — single pair detail (price, liquidity, volume, txns)
+- `get_token(chain, token_address)` — all pairs for a token on one chain
+- `search_pairs(query)` — free-text search across pairs (max 30 results)
+- `latest_token_profiles()` — newest tokens listed
+- `latest_boosted_tokens()` — tokens currently being promoted on DEX Screener
+- `token_boosts_top(chain?, token?)` — leaderboard of most-boosted tokens
+
+## Data source
+
+`https://api.dexscreener.com/` — JSON. Rate-limit ~300 req/min per IP.
+
+Common chain ids: `ethereum`, `solana`, `bsc`, `polygon`, `arbitrum`, `base`, `avalanche`, `optimism`, `fantom`.
 
 ## Quick Start
 
@@ -29,7 +33,7 @@ Add to your MCP client (Claude Desktop, Cursor, Windsurf, etc.):
 }
 ```
 
-Or connect to the full Pipeworx gateway for access to all 965+ data sources:
+Or connect to the full Pipeworx gateway for access to all 1394+ data sources:
 
 ```json
 {
@@ -53,7 +57,7 @@ The gateway picks the right tool and fills the arguments automatically.
 
 ## More
 
-- [All tools and guides](https://github.com/pipeworx-io/examples)
+- [Docs and guides](https://pipeworx.io/docs)
 - [pipeworx.io](https://pipeworx.io)
 
 ## License

@@ -2,7 +2,7 @@
 
 DEX Screener MCP — real-time DEX prices and liquidity across all major EVM + Solana chains. No auth.
 
-Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1476+ live data sources.
+Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1679+ live data sources.
 
 ## Tools
 
@@ -16,6 +16,29 @@ Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents 
 ## Data source
 
 `https://api.dexscreener.com/` — JSON. Rate-limit ~300 req/min per IP.
+
+Endpoints used, because two of the obvious-looking ones are wrong (fleet #1579,
+verified against the live API 2026-09-08):
+
+| Tool | Route | Note |
+|---|---|---|
+| `get_pair` | `/latest/dex/pairs/{chain}/{pair}` | |
+| `get_token` | `/token-pairs/v1/{chain}/{token}` | **not** `/tokens/v1/{chain}/{token}` — that route answers 200 with a SINGLE pool (WETH: 1 vs 30), so the wrong one loses 97% of the data without erroring |
+| `search_pairs` | `/latest/dex/search?q=` | |
+| `latest_token_profiles` | `/token-profiles/latest/v1` | bare array |
+| `latest_boosted_tokens` | `/token-boosts/latest/v1` | bare array |
+| `token_boosts_top` | `/token-boosts/top/v1` | takes no path filter; `chain`/`token` are filtered client-side |
+
+## What an empty answer means here
+
+DEX Screener signals "nothing indexed" with **HTTP 200 and an empty list** —
+`[]` from the `v1` routes, `{"pairs":null}` from `/latest/dex/pairs`. It does
+not 404 for an unknown address. So this pack only ever says `not_found:` on a
+200 it actually read; any error status is reported as `upstream_down:` and
+explicitly says it is NOT evidence about the caller's arguments. Before #1579
+the pack mapped every 404 to "no pairs for that address, check the chain and
+the exact contract address" — which was false for every `get_token` call it
+ever served, and convincing enough that callers re-checked correct addresses.
 
 Common chain ids: `ethereum`, `solana`, `bsc`, `polygon`, `arbitrum`, `base`, `avalanche`, `optimism`, `fantom`.
 
@@ -63,9 +86,45 @@ directly, instead of just this one's:
 }
 ```
 
-Both URLs reach the same gateway and the same 1476+ data sources. The
+Both URLs reach the same gateway and the same 1679+ data sources. The
 only difference is which pack's tools are listed **directly**; `ask_pipeworx`
 reaches all of them from either one.
+
+## No MCP client? Call it over HTTP
+
+```bash
+curl -X POST https://gateway.pipeworx.io/v1/tools/dexscreener_get_pair \
+  -H 'Content-Type: application/json' \
+  -d '{"chain":"ethereum","pair_address":"0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640"}'
+```
+
+No account needed for the first calls. Inspect any tool: `GET https://gateway.pipeworx.io/v1/tools/dexscreener_get_pair`. Find one: `POST https://gateway.pipeworx.io/v1/tools/search_packs` with `{"query":"..."}`.
+
+## Standalone (no gateway account)
+
+This package also runs as a local stdio MCP server — no Pipeworx account, no
+gateway round-trip:
+
+```json
+{
+  "mcpServers": {
+    "dexscreener": {
+      "command": "npx",
+      "args": ["-y", "@pipeworx/mcp-dexscreener"]
+    }
+  }
+}
+```
+
+Or run it directly to confirm it starts:
+
+```bash
+npx -y @pipeworx/mcp-dexscreener
+```
+
+It speaks MCP over stdin/stdout and answers `initialize`/`tools/list`/`tools/call`
+for **only** this pack's tools — none of the shared meta-tools the gateway
+connection above adds. Same source, same tools, no ask_pipeworx routing.
 
 ## Using with ask_pipeworx
 
@@ -86,13 +145,3 @@ The gateway picks the right tool and fills the arguments automatically.
 ## License
 
 MIT
-
-## No MCP client? Call it over HTTP
-
-```bash
-curl -X POST https://gateway.pipeworx.io/v1/tools/dexscreener_get_pair \
-  -H 'Content-Type: application/json' \
-  -d '{"chain":"ethereum","pair_address":"0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640"}'
-```
-
-No account needed for the first calls. Inspect any tool: `GET https://gateway.pipeworx.io/v1/tools/dexscreener_get_pair`. Find one: `POST https://gateway.pipeworx.io/v1/tools/search_packs` with `{"query":"..."}`.

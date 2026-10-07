@@ -760,7 +760,10 @@ function collapse(s: string): string {
 /**
  * DEX Screener MCP — DEX price/liquidity/volume data
  *
- * Auth: none. ~300 req/min per IP.
+ * Auth: none. get_pair/search_pairs/get_token: 300 req/min per IP.
+ * latest_token_profiles/latest_boosted_tokens/token_boosts_top (the three
+ * `dsList` endpoints — see fleet #2770 below): 60 req/min, shared across
+ * every Pipeworx Worker caller since we all share a Cloudflare egress pool.
  * Docs: https://docs.dexscreener.com/api/reference
  */
 
@@ -813,7 +816,12 @@ const tools: McpToolExport['tools'] = [
   },
   {
     name: 'get_token',
-    description: 'All trading pairs for a token address on one chain.',
+    // Fleet #2770: this bare name collides with blockscout_get_token, so an
+    // unscoped call returns `ambiguous_tool_name` instead of running either.
+    // Naming the scoped form here is the only fix available at this layer —
+    // the collision itself is between two packs' tool names, not a bug in
+    // either pack.
+    description: 'All trading pairs for a token address on one chain. If calling by bare name is ambiguous (collides with blockscout_get_token), call this as `dexscreener_get_token` instead.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1013,10 +1021,30 @@ async function screener(args: Record<string, unknown>) {
   // the profile and boost lists — so this screens THOSE, then pulls each
   // candidate's real pool numbers to filter/sort by. Cap candidates so one
   // tool call stays inside the Worker's execution budget.
+  //
+  // Both sub-fetches, and every per-token pool lookup below, used to be
+  // `.catch(() => [])` — ANY failure (a real 429 upstream_throttled, a 5xx,
+  // a timeout) silently became an empty array, indistinguishable from DEX
+  // Screener genuinely having nothing to say. That collapsed a transport
+  // failure into this tool's own "not_found: true" shape, which is exactly
+  // the silent-zero pattern (docs/silent-zero-policy.md): a caller who hit a
+  // shared-egress 429 (fleet #2763, 2026-10-07 — this pack's list endpoints
+  // are rate-limited 60 req/min, a budget shared across every Pipeworx
+  // Worker caller) got back a calm "thin moment for the promoted-token
+  // list" instead of the loud upstream_throttled this already reports
+  // correctly from get_token/search_pairs/etc. Track failures instead of
+  // discarding them, and only report a clean empty when DEX Screener itself
+  // actually answered empty.
+  const listErrors: Error[] = [];
   const [profiles, boosts] = await Promise.all([
-    dsList(`${BASE}/token-profiles/latest/v1`, 'token profiles').catch(() => [] as unknown[]),
-    dsList(`${BASE}/token-boosts/latest/v1`, 'boosted tokens').catch(() => [] as unknown[]),
+    dsList(`${BASE}/token-profiles/latest/v1`, 'token profiles').catch((e) => { listErrors.push(e as Error); return [] as unknown[]; }),
+    dsList(`${BASE}/token-boosts/latest/v1`, 'boosted tokens').catch((e) => { listErrors.push(e as Error); return [] as unknown[]; }),
   ]);
+  // Both source lists failed to reach DEX Screener at all — zero candidates
+  // here is a transport failure, not an empty answer. Rethrow the original
+  // error (unwrapped) so its class token (upstream_throttled:/upstream_down:)
+  // survives at position 0 for the gateway's classifier.
+  if (listErrors.length === 2) throw listErrors[0];
   const candidates = new Map<string, string>(); // tokenAddress -> chainId (lowercased key)
   for (const item of [...profiles, ...boosts]) {
     const row = item as { chainId?: unknown; tokenAddress?: unknown };
@@ -1027,23 +1055,40 @@ async function screener(args: Record<string, unknown>) {
   }
   const addrs = Array.from(candidates.values()).slice(0, 30);
   if (addrs.length === 0) {
+    const degradedNote = listErrors.length === 1
+      ? ` One of the two source lists failed to load (${dropClassPrefix(listErrors[0].message).slice(0, 160)}) — this screen only saw the other.`
+      : '';
     return {
       chain, checked: 0, matched: 0, pairs: [],
       not_found: true,
-      note: `DEX Screener's current profile/boost lists have no ${chain} tokens to screen (checked 0 candidates). Those lists turn over constantly — retry shortly, or use search_pairs for a specific token instead of a broad screen.`,
+      note: `DEX Screener's current profile/boost lists have no ${chain} tokens to screen (checked 0 candidates). Those lists turn over constantly — retry shortly, or use search_pairs for a specific token instead of a broad screen.${degradedNote}`,
     };
   }
 
+  let tokenFetchFailures = 0;
+  let firstTokenFetchError: Error | undefined;
+  let firstTokenFetchMessage: string | undefined;
   const perToken = await Promise.all(
     addrs.map(async (addr) => {
       try {
         const pairs = await dsGet<ScreenerPair[]>(`${BASE}/token-pairs/v1/${encodeURIComponent(chain)}/${encodeURIComponent(addr)}`);
         return Array.isArray(pairs) ? pairs : [];
-      } catch {
+      } catch (e) {
+        tokenFetchFailures++;
+        if (firstTokenFetchError === undefined) {
+          firstTokenFetchError = e as Error;
+          firstTokenFetchMessage = dropClassPrefix(firstTokenFetchError.message).slice(0, 160);
+        }
         return [] as ScreenerPair[];
       }
     }),
   );
+  // Every per-token pool lookup failed (not "came back empty" — failed to
+  // reach DEX Screener). Same silent-zero trap as the list fetches above:
+  // report the real transport failure loud rather than a clean "0 pools".
+  if (tokenFetchFailures > 0 && tokenFetchFailures === addrs.length && firstTokenFetchError) {
+    throw firstTokenFetchError;
+  }
   const allPairs = perToken.flat();
 
   const matched = allPairs.filter((p) => {
@@ -1073,11 +1118,19 @@ async function screener(args: Record<string, unknown>) {
     url: p.url ?? null,
   }));
 
+  // Some, but not all, per-token lookups failed to reach DEX Screener. We
+  // have real data from the rest, so this is not a loud failure — but the
+  // result is partial, and the old code gave no sign of that at all.
+  const degraded = tokenFetchFailures > 0
+    ? { checked: addrs.length, failed: tokenFetchFailures, reason: firstTokenFetchMessage }
+    : undefined;
+
   if (out.length === 0) {
     return {
       chain, checked: addrs.length, pools_seen: allPairs.length, matched: 0, pairs: [],
       not_found: true,
-      note: `Checked ${addrs.length} promoted ${chain} tokens (${allPairs.length} pools total) and none met the filter (liquidity>=$${minLiquidity}, volume24h>=$${minVolume}, mcap<=${Number.isFinite(maxMcap) ? '$' + maxMcap : 'no cap'}). Loosen the thresholds, or this is a thin moment for the promoted-token list.`,
+      degraded,
+      note: `Checked ${addrs.length} promoted ${chain} tokens (${allPairs.length} pools total) and none met the filter (liquidity>=$${minLiquidity}, volume24h>=$${minVolume}, mcap<=${Number.isFinite(maxMcap) ? '$' + maxMcap : 'no cap'}). Loosen the thresholds, or this is a thin moment for the promoted-token list.${degraded ? ` ${degraded.failed} of ${degraded.checked} per-token lookups failed rather than coming back genuinely empty (${degraded.reason}) — some of this emptiness may be transport failure, not a thin market.` : ''}`,
     };
   }
 
@@ -1089,7 +1142,9 @@ async function screener(args: Record<string, unknown>) {
     returned: out.length,
     filters: { min_liquidity_usd: minLiquidity, max_market_cap_usd: Number.isFinite(maxMcap) ? maxMcap : null, min_volume_24h_usd: minVolume },
     sort,
-    note: 'Screens DEX Screener\'s own promoted/profiled token lists (its "new/trending" surface), not the full chain firehose — their public API has no broader new-pair endpoint.',
+    degraded,
+    note: 'Screens DEX Screener\'s own promoted/profiled token lists (its "new/trending" surface), not the full chain firehose — their public API has no broader new-pair endpoint.'
+      + (degraded ? ` ${degraded.failed} of ${degraded.checked} per-token lookups failed to reach DEX Screener and were excluded rather than counted as empty — results may be incomplete.` : ''),
     pairs: out,
   };
 }
@@ -1119,7 +1174,14 @@ async function dsGet<T>(url: string): Promise<T> {
       'User-Agent': 'pipeworx-mcp-dexscreener/1.0 (+https://pipeworx.io)',
     },
   });
-  if (res.status === 429) throw new Error('upstream_throttled: DEX Screener rate-limit (HTTP 429) — retry shortly.');
+  if (res.status === 429) {
+    throw new Error(
+      'upstream_throttled: DEX Screener rate-limit (HTTP 429). The token-boosts/token-profiles list endpoints are ' +
+        'limited to 60 requests/minute, a budget shared across every Pipeworx caller hitting DEX Screener from this ' +
+        "Worker's egress — not a limit on your own usage. Retry in a few seconds; it clears quickly once the shared " +
+        'window rolls over.',
+    );
+  }
   if (!res.ok) {
     const detail = await httpErrorMessage(res, 'DEX Screener');
     throw new Error(
@@ -1132,16 +1194,160 @@ async function dsGet<T>(url: string): Promise<T> {
   return parseJson<T>(res, 'DEX Screener');
 }
 
-/** The three list endpoints all return a bare JSON array. */
+// Fleet #2770 (2026-10-07): DEX Screener rate-limits token-boosts/latest,
+// token-boosts/top and token-profiles/latest to 60 req/min — a budget shared
+// across EVERY Pipeworx Worker caller, not per end user. AE showed throttle
+// clusters (01:08/12:12/13:16/16:18/19:18/20:09 on 10-07) tracking a ramping
+// anonymous workload on this pack; the three endpoints below are the only
+// ones that trip it, and all three are identical for every caller (no args
+// reach them — dsList always calls them bare). That makes them exactly the
+// shape the platform's Cache API exists for: cache the raw body at the edge
+// so N simultaneous callers cost DEX Screener one request, not N.
+//
+// Uses `caches.default` (the Workers Cache API), same pattern as
+// mcps/gdelt/src/index.ts's cacheRead/cacheWrite — NOT a module-scope
+// variable. A module-scope cache lives inside one V8 isolate and resets on
+// every cold start / isolate recycle, so it would mask the problem on this
+// machine's test calls while doing nothing for the production traffic that
+// is actually spread across many isolates (the shape fleet #2754 flagged
+// for exactly this reason: per-isolate state is not durable, shared state).
+// `caches.default` is edge-wide and survives isolate churn.
+const LIST_CACHE_FRESH_SEC = 45;
+// If DEX Screener is actively throttling us, a 5-minute-old copy of a list
+// that itself turns over roughly every few minutes is a far better answer
+// than a thrown error — same stale-beats-nothing reasoning as gdelt's cache,
+// and these lists are promotional rankings, not point-in-time facts a caller
+// could be misled by if slightly stale (the response says exactly how old it
+// is either way).
+const LIST_CACHE_STALE_SEC = 300;
+const FETCHED_AT_HEADER = 'x-pw-fetched-at';
+
+// `caches` is a Workers-runtime global (undefined under plain Node, which is
+// what this pack's own vitest run uses — there is no miniflare/workers pool
+// configured for mcps/*). Feature-detect on every call rather than memoize
+// once at module scope: a module-scope snapshot taken before the runtime (or
+// a test) ever assigns the global would freeze "undefined" forever even once
+// it exists — the same per-isolate-state trap fleet #2754 flagged, just for a
+// reference instead of a value. Caching is an optimisation, so its absence
+// should silently fall back to "always fetch live" rather than throw `caches
+// is not defined` and take the whole tool down with it.
+function cacheStore(): CacheStorage | undefined {
+  return typeof caches !== 'undefined' ? caches : undefined;
+}
+
+async function listCacheRead(key: Request): Promise<{ body: string; ageSec: number } | null> {
+  const store = cacheStore();
+  if (!store) return null;
+  const hit = await store.default.match(key).catch(() => undefined);
+  if (!hit) return null;
+  const at = Number(hit.headers.get(FETCHED_AT_HEADER) ?? 0);
+  if (!at) return null;
+  return { body: await hit.text(), ageSec: Math.max(0, Math.round((Date.now() - at) / 1000)) };
+}
+
+async function listCacheWrite(key: Request, body: string): Promise<void> {
+  const store = cacheStore();
+  if (!store) return;
+  await store.default
+    .put(
+      key,
+      new Response(body, {
+        headers: {
+          'content-type': 'application/json',
+          'Cache-Control': `s-maxage=${LIST_CACHE_STALE_SEC}`,
+          [FETCHED_AT_HEADER]: String(Date.now()),
+        },
+      }),
+    )
+    .catch(() => {
+      /* caching is an optimisation; a failed put must not fail the call */
+    });
+}
+
+/**
+ * The three list endpoints all return a bare JSON array, take no arguments,
+ * and answer identically for every caller — cached at the edge per the note
+ * above. `dsGet` (not this function) still owns every shape/transport check.
+ *
+ * Fleet #2770 FOLLOW-UP (2026-10-07, same day — Lap's post-deploy probe):
+ * EMPTY RESPONSES ARE NEVER CACHED, in either direction. 20 back-to-back
+ * `latest_boosted_tokens` calls post-deploy came back 0-with-data /
+ * 2-upstream_throttled / 18-empty-"not_queried" — the 18 were my cache
+ * serving a `[]` written by an earlier call, for up to 300s, with no way
+ * for a caller to tell "DEX Screener has nothing right now" from "we are
+ * replaying a 5-minute-old nothing". An empty answer is exactly the case
+ * where staleness has the LEAST value (there is nothing to protect against
+ * re-fetching) and the HIGHEST cost (it silently papers over a currently-
+ * blocked upstream for the entire TTL). So: writes skip an empty body
+ * outright, and reads treat a cached empty as a miss (covers a `[]` written
+ * by a pre-fix deploy that is still inside its TTL at rollout).
+ *
+ * This is NOT the same defect as a disguised block, and a live edge probe
+ * (wrangler dev --remote on the prod account, same-minute laptop control)
+ * proved the distinction rather than assuming it: a BURST of 4 near-
+ * simultaneous requests from the Worker got Cloudflare's own edge rate
+ * limit (HTTP 429, "error code: 1015" plain-text body — DEX Screener's zone
+ * rejecting Cloudflare-to-Cloudflare traffic under load, not an app-level
+ * answer) on every URL, while a single isolated request got byte-identical
+ * 200s to the laptop, `cf-cache-status: HIT`, body included. That 429 is
+ * already loud: `dsGet` below checks `res.status === 429` BEFORE attempting
+ * to parse anything, so neither the list endpoints nor get_token's
+ * token-pairs lookup can silently swallow it — confirmed by probing
+ * get_token's own URL (WETH on ethereum) through the same Worker and
+ * getting the correctly-thrown-shape 429. The separate "WETH shows 0 pairs"
+ * observation checked out as a genuine upstream state, not an egress
+ * artifact: `token-pairs/v1`, `tokens/v1` AND `/latest/dex/search?q=WETH`
+ * all answered empty for a PLAIN LAPTOP CURL with no Worker involved,
+ * `cf-cache-status: HIT` on each — DEX Screener's own edge cache is
+ * currently holding an empty answer for that token across every route
+ * shape, which is a DEX Screener-side condition this pack cannot see or
+ * fix, not a sign our egress is being treated differently. No egress
+ * relay is wired here because nothing here showed the oscn.net pattern
+ * (Worker always blocked, laptop always fine) — only the already-known,
+ * intermittent, burst-triggered shared-edge throttle.
+ */
 async function dsList(url: string, what: string): Promise<unknown[]> {
-  const body = await dsGet<unknown>(url);
-  if (!Array.isArray(body)) {
-    throw new Error(
-      `upstream_down: DEX Screener returned an unexpected shape for ${what} (expected a JSON array). ` +
-        'Their response format has changed or a proxy answered in their place — nothing about the request causes this.',
-    );
+  const key = new Request(url);
+  const cached = await listCacheRead(key);
+  if (cached && cached.ageSec < LIST_CACHE_FRESH_SEC) {
+    const parsed = JSON.parse(cached.body) as unknown;
+    // An empty cached array is treated as a miss, not a hit — see the
+    // never-cache-empty note above. Covers a `[]` written before this fix
+    // that is still inside its TTL at the moment this version deploys.
+    if (Array.isArray(parsed) && parsed.length > 0) return parsed;
   }
-  return body;
+
+  try {
+    const body = await dsGet<unknown>(url);
+    if (!Array.isArray(body)) {
+      throw new Error(
+        `upstream_down: DEX Screener returned an unexpected shape for ${what} (expected a JSON array). ` +
+          'Their response format has changed or a proxy answered in their place — nothing about the request causes this.',
+      );
+    }
+    // Only a NON-EMPTY answer is worth protecting from a repeat upstream
+    // call. An empty one costs nothing to re-check next time and costs a
+    // lot to freeze (see the note above) — so it is never written.
+    if (body.length > 0) await listCacheWrite(key, JSON.stringify(body));
+    return body;
+  } catch (err) {
+    // Upstream refused (most commonly the 60 rpm throttle) and we have a
+    // not-too-old copy — serve it rather than failing. Only for genuine
+    // transport/throttle failures: a non-array-shape error above is a data
+    // problem, not a reason to trust an old cache either, so it is included
+    // deliberately (stale data beats none for the SAME reason it beats none
+    // on a throttle — DEX Screener's own promoted lists don't turn over
+    // sub-minute).
+    if (cached && cached.ageSec < LIST_CACHE_STALE_SEC) {
+      const parsed = JSON.parse(cached.body) as unknown;
+      // An empty stale entry is worth exactly as little as an empty fresh
+      // one — never serve it as a fallback either. A throttled call with
+      // nothing honest to fall back on should throw, not manufacture a
+      // "successful" empty that is indistinguishable from the real thing.
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+    throw err;
+  }
 }
 
 function reqStr(args: Record<string, unknown>, key: string, example: string): string {

@@ -1,6 +1,6 @@
 {
   "name": "@pipeworx/mcp-dexscreener",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "DEX Screener MCP — DEX price/liquidity/volume data",
   "type": "module",
   "main": "src/index.ts",
@@ -26,7 +26,7 @@
     "@cloudflare/workers-types": "^4.20260405.1"
   },
   "pipeworx": {
-    "sourceHash": "v1-19fa2816af26ada433d52d642fc5352d5b50fa873f8d0bf69a27f1e76510a948",
-    "sourceCommit": "5749f83c0ea115fab4c0c0ef04b66b05f2507d67"
+    "sourceHash": "v1-45cbe2cfe64d1340865d833e3cb0e5c38b8bfe1e6aad8785f549c0304a87163d",
+    "sourceCommit": "29fb434ca65fe0f61191f19c3502f583f5fb99d7"
   }
 }

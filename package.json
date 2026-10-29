@@ -1,12 +1,20 @@
 {
   "name": "@pipeworx/mcp-dexscreener",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "description": "DEX Screener MCP — DEX price/liquidity/volume data",
   "type": "module",
-  "main": "src/index.ts",
-  "types": "src/index.ts",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./tools.json": "./tools.json",
+    "./package.json": "./package.json"
+  },
   "bin": {
     "mcp-dexscreener": "bin/cli.js"
+  },
+  "files": ["bin/", "lib/", "tools.json", "server.json"],
+  "engines": {
+    "node": ">=18"
   },
   "keywords": ["mcp", "mcp-server", "model-context-protocol", "pipeworx", "dexscreener"],
   "license": "MIT",
@@ -14,19 +22,12 @@
     "type": "git",
     "url": "git+https://github.com/pipeworx-io/mcp-dexscreener.git"
   },
-  "scripts": {
-    "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "tsx": "^4.19.0"
-  },
-  "devDependencies": {
-    "typescript": "^5.9.3",
-    "@cloudflare/workers-types": "^4.20260405.1"
-  },
+  "mcpName": "io.github.pipeworx-io/dexscreener",
   "pipeworx": {
-    "sourceHash": "v1-45cbe2cfe64d1340865d833e3cb0e5c38b8bfe1e6aad8785f549c0304a87163d",
-    "sourceCommit": "29fb434ca65fe0f61191f19c3502f583f5fb99d7"
+    "mode": "gateway",
+    "slug": "dexscreener",
+    "gatewaySlug": "dexscreener",
+    "sourceHash": "v1-c032369bc225731794ef0bcc23fc7cb563205e24640a461740ea27d89e08dfc0",
+    "sourceCommit": "0b3faaa4d85299a961dd86dea75a0f0e1dad280c"
   }
 }
